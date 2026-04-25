@@ -1,0 +1,247 @@
+#from datamodel import OrderDepth, TradingState, Order
+from prosperity4bt.datamodel import OrderDepth, TradingState, Order
+
+from typing import List, Dict, Any
+import json
+import math
+
+# ─────────────────────────────────────────────
+#  CONSTANTS
+# ─────────────────────────────────────────────
+
+POSITION_LIMITS: Dict[str, int] = {
+    "EMERALDS": 80,
+    "TOMATOES": 80,
+    "INTARIAN_PEPPER_ROOT": 80,
+    "ASH_COATED_OSMIUM": 80
+}
+
+# ─────────────────────────────────────────────
+#  BASE STRATEGY
+# ─────────────────────────────────────────────
+
+class Strategy:
+    def __init__(self, product: str, state: TradingState, memory: Dict[str, Any]):
+        self.product  = product
+        self.state    = state
+        self.memory   = memory
+        self.position = state.position.get(product, 0)
+        self.limit    = POSITION_LIMITS.get(product, 20)
+        self.od: OrderDepth = state.order_depths.get(product, OrderDepth())
+
+    def best_bid(self):
+        return max(self.od.buy_orders) if self.od.buy_orders else None
+
+    def best_ask(self):
+        return min(self.od.sell_orders) if self.od.sell_orders else None
+
+    # Static Mid-Price for standard calculations
+    def mid_price(self):
+        bb, ba = self.best_bid(), self.best_ask()
+        if bb is not None and ba is not None:
+            return (bb + ba) / 2
+        return None
+
+    # Dynamic VWAP to capture true market gravity
+    def vwap_price(self):
+        total_value, total_vol = 0, 0
+        for price, vol in self.od.buy_orders.items():
+            total_value += price * vol
+            total_vol += vol
+        for price, vol in self.od.sell_orders.items():
+            total_value += price * abs(vol)
+            total_vol += abs(vol)
+        
+        if total_vol > 0:
+            return total_value / total_vol
+        return self.mid_price() 
+
+    def buy_capacity(self):
+        return self.limit - self.position
+
+    def sell_capacity(self):
+        return self.limit + self.position
+
+    def clamp_buy(self, qty: int) -> int:
+        return min(qty, self.buy_capacity())
+
+    def clamp_sell(self, qty: int) -> int:
+        return min(qty, self.sell_capacity())
+
+    def run(self) -> List[Order]:
+        raise NotImplementedError
+
+# ─────────────────────────────────────────────
+#  STRATEGY 1 — OPTIMIZED MARKET MAKING (For ASH_COATED_OSMIUM)
+# ─────────────────────────────────────────────
+class MarketMakingStrategy(Strategy):
+    def run(self) -> List[Order]:
+        # 1. FAIR VALUE (Stable Mix)
+        mid = self.mid_price() or 10000
+        ema_key = f"ema_{self.product}"
+        alpha = 0.19
+        prev_ema = self.memory.get(ema_key, mid)
+        ema = alpha * mid + (1 - alpha) * prev_ema
+        self.memory[ema_key] = ema
+        mult_mid = -0.8
+        fv = mult_mid * mid + (1 - mult_mid) * ema #VERY STRONG MEAN REVERTING
+
+        # 2. LINEAR SKEW
+        skew = 0.08 * self.position
+        base_fv = fv - skew
+
+        # 3. PRICING LOGIC (Pennying)
+        market_bid = self.best_bid()
+        market_ask = self.best_ask()
+
+        min_edge = 2
+        max_bid = math.floor(base_fv - min_edge)
+        min_ask = math.ceil(base_fv + min_edge)
+
+        if market_bid is not None:
+            bid_price = min(max_bid, market_bid + 1)
+        else:
+            bid_price = max_bid
+
+        if market_ask is not None:
+            ask_price = max(min_ask, market_ask - 1)
+        else:
+            ask_price = min_ask
+
+        # BASICS SIZE (STABLE)
+        buy_size = 20
+        sell_size = 20
+
+        # Only slight reduction near limits to avoid blocking the bot,
+        # but NO aggressive pushing.
+        if self.position > 60:
+            buy_size = 10  # Reduce buying to avoid hitting 80
+            sell_size = 20 # Keep standard selling
+        elif self.position < -60:
+            buy_size = 20  # Keep standard buying
+            sell_size = 10 # Reduce selling to avoid hitting -80
+
+        buy_qty = self.clamp_buy(buy_size)
+        sell_qty = self.clamp_sell(sell_size)
+
+        orders: List[Order] = []
+
+        # 4. VERY LIGHT TAKING ON BEST LEVEL ONLY
+        if market_ask is not None and market_ask < math.floor(base_fv - 1) and buy_qty > 0:
+            ask_vol = abs(self.od.sell_orders[market_ask])
+            take_qty = min(buy_qty, ask_vol)
+            if take_qty > 0:
+                orders.append(Order(self.product, market_ask, take_qty))
+                buy_qty = buy_qty - take_qty
+
+        if market_bid is not None and market_bid > math.ceil(base_fv + 1) and sell_qty > 0:
+            bid_vol = self.od.buy_orders[market_bid]
+            take_qty = min(sell_qty, bid_vol)
+            if take_qty > 0:
+                orders.append(Order(self.product, market_bid, -take_qty))
+                sell_qty = sell_qty - take_qty
+
+        # 5. PASSIVE QUOTES WITH REMAINING SIZE
+        if buy_qty > 0:
+            orders.append(Order(self.product, bid_price, buy_qty))
+        if sell_qty > 0:
+            orders.append(Order(self.product, ask_price, -sell_qty))
+
+        return orders
+# ─────────────────────────────────────────────
+#  STRATEGY 2 — PROTECTED TREND RIDER (For Pepper)
+# ─────────────────────────────────────────────
+class DirectionalTrendStrategy(Strategy):
+    """
+    Directional strategy with an Emergency Exit trigger.
+    If the price drops sharply below a slow EMA, it liquidates the position.
+    """
+    def run(self) -> List[Order]:
+        fv = self.vwap_price() 
+
+        # --- TREND SAFETY GUARD (Cataclysm Protection) ---
+        ema_slow_key = f"ema_slow_{self.product}"
+        prev_ema_slow = self.memory.get(ema_slow_key, fv)
+        mult_fv = 0.05
+        ema_slow = mult_fv * fv + (1 - mult_fv) * prev_ema_slow
+        self.memory[ema_slow_key] = ema_slow
+
+        exit_flag_key = f"exit_flag_{self.product}"
+        exit_flag = self.memory.get(exit_flag_key, 0)
+
+        target_pos = 75
+
+        # first break: arm the alarm
+        if fv < (ema_slow - 15):
+            if exit_flag == 1:
+                target_pos = 0   # confirmed break -> emergency liquidation
+            else:
+                self.memory[exit_flag_key] = 1
+        else:
+            self.memory[exit_flag_key] = 0
+        # --- STANDARD LOGIC ---
+        position_offset = self.position - target_pos
+        skew = position_offset * 0.095
+        
+        bid_price = math.floor(fv - 5 - skew)
+        ask_price = math.ceil (fv + 6 - skew)
+
+        orders: List[Order] = []
+        buy_qty = self.clamp_buy(80)
+        sell_qty = self.clamp_sell(80)
+
+        # Do not buy if we are in Emergency Mode (target_pos = 0)
+        if self.od.sell_orders and target_pos > 0:
+            for ask_p, ask_vol in sorted(self.od.sell_orders.items()):
+                if ask_p <= (fv - skew) and buy_qty > 0:
+                    take_vol = min(buy_qty, abs(ask_vol))
+                    orders.append(Order(self.product, ask_p, take_vol))
+                    buy_qty -= take_vol
+                else: break 
+
+        if buy_qty > 0 and target_pos > 0:
+            orders.append(Order(self.product, bid_price, +buy_qty))
+        if self.position > target_pos:
+            orders.append(Order(self.product, ask_price, -sell_qty))
+
+        return orders
+
+# ─────────────────────────────────────────────
+#  PRODUCT → STRATEGY ROUTING
+# ─────────────────────────────────────────────
+
+def get_strategy(product: str, state: TradingState, memory: Dict) -> Strategy:
+    routing = {
+        "ASH_COATED_OSMIUM": MarketMakingStrategy,
+        "INTARIAN_PEPPER_ROOT": DirectionalTrendStrategy,
+    }
+    # Default to MarketMaking if not specified
+    cls = routing.get(product, MarketMakingStrategy)
+    return cls(product, state, memory)
+
+# ─────────────────────────────────────────────
+#  TRADER ENTRY POINT
+# ─────────────────────────────────────────────
+
+class Trader:
+    def bid(self):
+        return 2000
+    def run(self, state: TradingState):
+        try:
+            memory: Dict[str, Any] = json.loads(state.traderData) if state.traderData else {}
+        except Exception:
+            memory = {}
+
+        result: Dict[str, List[Order]] = {}
+
+        for product in state.order_depths:
+            strategy = get_strategy(product, state, memory)
+            try:
+                orders = strategy.run()
+            except Exception as e:
+                print(f"[ERROR] {product}: {e}")
+                orders = []
+            result[product] = orders
+
+        traderData = json.dumps(memory)
+        return result, 0, traderData

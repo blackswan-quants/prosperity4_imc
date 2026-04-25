@@ -41,6 +41,18 @@ If you wish to quickly see the base plots as well, you can instead use:
 ```bash
 python -m prosperity4bt my_bot/trader.py 0--1 --data ./data --out ./run.log; python quick_plot.py
 ``` 
+ROUND1:
+python -m prosperity4bt my_bot/trader.py 1 --data ./data --out ./run_round_1_completo.log
+python -m prosperity4bt my_bot/trader.py 1 --data ./data --out ./run.log; python quick_plot.py
+
+ROUND 2:
+python -m prosperity4bt my_bot/trader.py 2 --data ./data --out ./run_round_2_completo.log
+python -m prosperity4bt my_bot/trader.py 2 --data ./data --out ./run.log; python quick_plot.py
+
+ROUND 3:
+python -m prosperity4bt my_bot/trader.py 3 --data ./data --out ./run_round_3_completo.log
+python -m prosperity4bt my_bot/trader.py 3 --data ./data --out ./run.log; python quick_plot.py
+
 
 ## 5. [OPTIONAL] Visualizing the Results with Streamlit
 To see the deep interactive charts for your run (after having done step 4):
@@ -73,8 +85,21 @@ When new assets are introduced, they will have different maximum inventory limit
 3. Add the new asset and its limit:
    ```python
    POSITION_LIMITS = {
-       "EMERALDS": 80,
-       "TOMATOES": 80,
-       "NEW_ASSET": 50 # Add new ones here
-   }
+    "EMERALDS": 80,
+    "TOMATOES": 80,
+    "INTARIAN_PEPPER_ROOT": 80,
+    "ASH_COATED_OSMIUM": 80,
+    "HYDROGEL_PACK": 100,
+    "VELVETFRUIT_EXTRACT": 100,
+    "VEV_4000": 300,
+    "VEV_4500": 300,
+    "VEV_5000": 300,
+    "VEV_5100": 300,
+    "VEV_5200": 300,
+    "VEV_5300": 300,
+    "VEV_5400": 300,
+    "VEV_5500": 300,
+    "VEV_6000": 300,
+    "VEV_6500": 300,
+}
    ```

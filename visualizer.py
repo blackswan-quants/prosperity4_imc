@@ -12,7 +12,20 @@ import re
 POSITION_LIMITS = {
     "EMERALDS": 80,
     "TOMATOES": 80,
-    # You can add future round assets here!
+    "INTARIAN_PEPPER_ROOT": 80,
+    "ASH_COATED_OSMIUM": 80,
+    "HYDROGEL_PACK": 100,
+    "VELVETFRUIT_EXTRACT": 100,
+    "VEV_4000": 300,
+    "VEV_4500": 300,
+    "VEV_5000": 300,
+    "VEV_5100": 300,
+    "VEV_5200": 300,
+    "VEV_5300": 300,
+    "VEV_5400": 300,
+    "VEV_5500": 300,
+    "VEV_6000": 300,
+    "VEV_6500": 300,
 }
 DEFAULT_LIMIT = 20  # Fallback just in case
 
